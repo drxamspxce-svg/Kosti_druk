@@ -2,7 +2,7 @@
 
 from aiogram import Router, F, types, Bot
 from aiogram.enums import DiceEmoji
-from aiogram.exceptions import TelegramBadRequest # <--- Импортируем обработчик этой ошибки
+from aiogram.exceptions import TelegramBadRequest
 from config import ADMIN_ID
 from state import game_state, get_list_text
 from keyboards.reply_inline import get_list_ikb
@@ -29,7 +29,7 @@ async def update_list_msg(bot: Bot):
                 reply_markup=get_list_ikb()
             )
         except TelegramBadRequest:
-            pass # Если текст не изменился, просто молча игнорируем ошибку
+            pass
 
 # --- 1. ВЫВОД СПИСКА ---
 @group_router.message(F.text == "/sendlist", F.chat.type.in_({"group", "supergroup"}))
@@ -53,20 +53,26 @@ async def add_player_from_business(message: types.Message, bot: Bot):
 @group_router.message(F.text == "/go", F.chat.type.in_({"group", "supergroup"}))
 async def call_next_player(message: types.Message, bot: Bot):
     if message.from_user.id != ADMIN_ID: return
+    
     current = get_current_playing_player()
     if current:
-        await message.answer(f"⏳ Заверши ход игрока {current[1]} (/win или /lose)")
+        # УМНАЯ ПОДСКАЗКА: Зависит от того, финал сейчас или обычный круг
+        if game_state.get("is_final"):
+            await message.answer(f"⏳ Игрок {current[1]} еще кидает 5 кубиков!\n<i>(Если он уснул/пропал, нажми /lose чтобы выкинуть его)</i>")
+        else:
+            await message.answer(f"⏳ Заверши ход игрока {current[1]} (/win или /lose)")
         return
+        
     next_player = get_next_waiting_player()
     if not next_player:
         await message.answer("🎉 Очередь пуста!")
         return
+        
     p_id, username = next_player
     update_player_status(p_id, "🎲 играет")
     
     await update_list_msg(bot)
     
-    # Очищаем память кубиков только для этого игрока
     if "scores" not in game_state: game_state["scores"] = {}
     game_state["scores"][p_id] = {"total": 0, "count": 0}
 
@@ -122,7 +128,7 @@ async def start_final_mode(message: types.Message, bot: Bot):
     game_state["scores"] = {}
     reset_statuses()
     await update_list_msg(bot)
-    await message.answer("🏆 <b>ФИНАЛ НАЧАЛСЯ!</b>\nТеперь игроки кидают по 5 кубиков, а очки идут в зачет. Пиши /go")
+    await message.answer("🏆 <b>ФИНАЛ НАЧАЛСЯ!</b>\nТеперь игроки кидают по 5 кубиков, а очки идут в список. Пиши /go")
 
 # --- 9. УПОРЯДОЧИВАНИЕ (Кнопка) ---
 @group_router.callback_query(F.data == "reorder")
@@ -134,7 +140,7 @@ async def reorder_list_callback(callback: types.CallbackQuery, bot: Bot):
 
 # --- 10. МАГИЯ: АВТОПОДСЧЕТ КУБИКОВ 🎲 ---
 @group_router.message(F.dice)
-async def handle_dice(message: types.Message):
+async def handle_dice(message: types.Message, bot: Bot): # <--- Добавили bot сюда для обновления списка
     if message.dice.emoji != "🎲": return 
     current = get_current_playing_player()
     if not current: return 
@@ -159,13 +165,17 @@ async def handle_dice(message: types.Message):
     count = game_state["scores"][p_id]["count"]
     
     if not is_final:
+        # ЛОГИКА ОБЫЧНОГО КРУГА
         if count == 3:
             await message.reply(f"🎯 <b>3 броска сделано!</b> (Сумма: {total})\n<i>Судья, жми /win или /lose</i>")
         else:
             await message.reply(f"🎰 Бросок {count}/3: выпало <b>{val}</b>.")
     else:
+        # ЛОГИКА ФИНАЛА (РЕВОРК)
         if count == 5:
-            await message.reply(f"🏁 <b>5 бросков завершены!</b>\n🔥 Итоговая сумма для топа: <b>{total}</b>")
+            update_player_status(p_id, f"🎯 {total}") # Сохраняем очки прямо в статус!
+            await update_list_msg(bot) # Мгновенно обновляем сообщение со списком
+            await message.reply(f"🏁 <b>5 бросков завершены!</b>\n🔥 Итоговая сумма в списке: <b>{total}</b>\n<i>👉 Напиши /go для следующего игрока</i>")
         else:
             await message.reply(f"🎰 Бросок {count}/5: выпало <b>{val}</b>. Текущая сумма: <b>{total}</b>")
 
